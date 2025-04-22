@@ -1,41 +1,14 @@
 #standard
-import dataclasses
-import pickle
-import argparse
 import os
-import re
 from glob import glob
 import numpy as np
 import pandas as pd
-from typing import Callable, NamedTuple
-import time
-import sys
 from Bio import SeqIO
 import random
 
 #nn stuff
-import optax
-import chex
 import haiku as hk
-import jax
 import jax.numpy as jnp
-
-#NT
-from nucleotide_transformer.pretrained import get_pretrained_model
-
-#enn imports
-import enn
-from enn import losses
-from enn import networks
-from enn import supervised
-from enn import base
-from enn import data_noise
-from enn import utils
-from enn import losses
-from enn.loggers import TerminalLogger
-from enn.supervised import classification_data
-from enn.supervised import regression_data
-from enn.networks.bert import make_head_enn, AgentConfig
 
 #custom
 from utils import calc_metrics

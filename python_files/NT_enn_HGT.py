@@ -72,7 +72,6 @@ def train(args):
     dataset, num_classes = datasets.make_genome_dataset(args.input_path, tokenizer, args.batch_size)
     print(f"running training with {num_classes} labels")
     train_dataset = dataset['train']
-    test_dataset = dataset['test']
     dev_dataset = dataset['dev']
     
     # define epinet model
