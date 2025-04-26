@@ -29,16 +29,20 @@ def train(args: TrainArgs):
         embeddings_layers_to_save=(m.embeddings_layer,),
         max_positions=m.max_positions,
     )
+    forward_fn = hk.transform(forward_fn)
 
     dataset, num_classes = make_genome_dataset(Path(args.input_path), tokenizer, args.batch_size)
     m.num_classes = num_classes
     train_dataset = dataset['train']
-
+    print(f"length of final training dataset: {train_dataset._length}")
+    
+    print("initializing epinet...")
     epinet_config = AgentConfig(index_dim=m.index_dim, prior_scale=m.prior_scale, hiddens=m.hiddens)
     epinet = make_head_enn(agent="epinet", num_classes=m.num_classes, agent_config=epinet_config)
 
     first_batch, _ = next(iter(train_dataset))
-    pooled = jnp.mean(forward_fn(nt_params, key, first_batch)[f"embeddings_{m.embeddings_layer}"], axis=1)
+
+    pooled = jnp.mean(forward_fn.apply(nt_params, key, first_batch)[f"embeddings_{m.embeddings_layer}"], axis=1)
     epinet_index = epinet.indexer(key)
     epinet_params, epinet_state = epinet.init(rng=key, x=pooled, z=epinet_index)
 
@@ -79,9 +83,13 @@ def train(args: TrainArgs):
     @jax.jit
     def train_step(batch_tokens, batch_labels, NT_params, epinet_params, epinet_state, opt_state, key):
         # step 1 - get NT embeddings
-        embeddings = forward_fn(NT_params, key, batch_tokens)
-        pooled = jnp.mean(embeddings[f"embeddings_{embedding_layer}"], axis=1) # mean pooling - this can be switched to max for further testing
-        
+        embeddings = forward_fn.apply(NT_params, key, batch_tokens)
+        pooled = jnp.mean(embeddings[f"embeddings_{m.embeddings_layer}"], axis=1) # mean pooling - this can be switched to max for further testing
+        #epinet_index = epinet.indexer(key)
+        #epinet_output, _ = epinet.apply(epinet_params, epinet_state, pooled, epinet_index)
+        #print("Logits:", epinet_output.preds)
+        #print("Labels:", batch_labels)
+
         # step 2 - pass embeddings through epinet at multiple indices + get loss                 
         (loss, new_epinet_state), grads = jax.value_and_grad(loss_fn, has_aux=True)(
             epinet_params, epinet_state, pooled, batch_labels, key)
@@ -92,17 +100,40 @@ def train(args: TrainArgs):
             
         return new_params, new_epinet_state, new_opt_state, loss
               
+    print("Starting training...")
+    print(f"Number of classes: {num_classes}")
+    print(f"Batch size: {args.batch_size}")
 
-    batch_no = 0
     for epoch in range(args.epochs):
+        total_batches = (train_dataset._length + args.batch_size - 1) // args.batch_size
+        batch_no = 0
+
+        print(f"\nNumber of batches: {total_batches}")
+        print(f"Number of epochs: {args.epochs}")
+
+        bar_width = 30           # visual width of the bar
+        batches_per_full_bar = 1000  # how many batches to fill the whole bar
+
         for batch_tokens, batch_labels in train_dataset:
             key = next(rng)
             epinet_params, epinet_state, opt_state, loss = train_step(
                 batch_tokens, batch_labels, nt_params, epinet_params, epinet_state, opt_state, key)
 
-            if batch_no % 50 == 0:
-                print(f"Epoch {epoch}, Batch {batch_no}, Loss: {loss:.4f}")
+            # Calculate progress within the current 1000-batch block
+            mini_batch_no = batch_no % batches_per_full_bar
+            filled = int(bar_width * (mini_batch_no + 1) / batches_per_full_bar)
+            bar = '[' + '=' * filled + ' ' * (bar_width - filled) + ']'
+
+            print(f"\rEpoch {epoch+1}/{args.epochs} {bar} Batch {batch_no}", end='')
+
+            if (batch_no + 1) % batches_per_full_bar == 0:
+                # After 1000 batches, print loss and reset bar
+                print(f"\nEpoch {epoch}, Batch {batch_no}, Loss: {loss:.4f}")
+
             batch_no += 1
+
+        print()  # newline after each epoch
+
 
     Path(args.output_path).mkdir(parents=True, exist_ok=True)
     with open(Path(args.output_path) / 'epi_params_final.pkl', 'wb') as f:

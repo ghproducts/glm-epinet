@@ -25,7 +25,7 @@ class Dataset:
         if len(x) != len(y):
             raise ValueError("Input data x and labels y must have the same length.")
 
-        self._x = np.array(x)
+        self._x = x
         self._y = np.array(y)
         self._batch_size = batch_size
         self._tokenizer = tokenizer
@@ -131,6 +131,10 @@ class Genome_Dataset(Dataset):
 
         for seq, label in zip(self._x, self._y):
             tokens, token_ids = self._tokenizer.tokenize(seq) # tokenize entire genome first
+            
+            if len(tokens) < self._tokenizer.fixed_length:
+                continue
+
             val = len(tokens) // self._tokenizer.fixed_length # num of seqs in each genome
 
             tokens = np.array_split(tokens[:val*self._tokenizer.fixed_length], val)
@@ -138,11 +142,12 @@ class Genome_Dataset(Dataset):
             
             self._tokens_str.extend(tokens)
             self._tokens_ids.extend(token_ids)
-            temp_labels.extend([label]*val)
+            temp_labels.extend([int(label)]*val)
         
         self._y = temp_labels
         self._idx = 0  # Initialize the starting index
         self._length = len(self._y)
+        self._tokenized = True
 
     def randomize(self):
         """
@@ -173,7 +178,7 @@ def make_genome_dataset(input_path, tokenizer, batch_size):
     """
     dataset = {}
 
-    for split in ['train', 'test', 'dev']:
+    for split in ['train']: #, 'test', 'dev']:
         folder_path = os.path.join(input_path, split)
         
         genomes = []
@@ -182,20 +187,23 @@ def make_genome_dataset(input_path, tokenizer, batch_size):
         for entry in os.listdir(folder_path):
             if entry.endswith('.fasta'):
                 file_path = os.path.join(folder_path, entry)
+                print(entry, end="\r")
             else:
                 continue
+
             fasta_sequences = SeqIO.parse(open(file_path),'fasta')
             
             for fasta in fasta_sequences:
                 labels.append(fasta.id) 
                 genomes.append(str(fasta.seq))
-
+        print("imported genomes")
+        print("making dataset")
         # make database from genomes
         dataset[split] = Genome_Dataset(genomes, labels, batch_size, tokenizer)
         dataset[split].tokenize()  # Explicit tokenization
         if split == 'train':
             num_classes = len(set(labels))
-
+    print("tokenized dataset")
     dataset['train'].randomize()
 
     return dataset, num_classes

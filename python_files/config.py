@@ -6,7 +6,7 @@ from typing import Optional, List
 class ModelArgs:
     # NT model args
     model_name: str = "100M_multi_species_v2"
-    max_positions: int = 50
+    max_positions: int = 33
     embeddings_layer: int = 21
 
     # Epinet model args

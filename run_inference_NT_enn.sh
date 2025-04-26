@@ -22,6 +22,8 @@ source /ifs/groups/rosenMRIGrp/glh52/venvs/py390-ENN2/bin/activate
 #python3 -m pip install rlax==0.1.4
 #python3 -m pip install tensorflow==2.8.0
 #python3 -m pip install tensorflow_probability==0.15.0
+#pip install optax==0.1.3 --no-deps
+
 
 cd /ifs/groups/rosenMRIGrp/glh52/epinet_v2/python_files/
 for files in witheld.csv test_base.csv partial.csv #witheld_sampled.csv

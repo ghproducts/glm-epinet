@@ -1,0 +1,12 @@
+#!/bin/bash
+
+source ~/envs/py390-ENN2/bin/activate
+pip list
+cd ~/Projects/glm-epinet/python_files
+
+python3 main.py \
+	--input_path ~/Projects/glm-epinet/DATA/HGT \
+	--output_path ~/Projects/glm-epinet/models \
+	--epochs 1 \
+	--batch_size 64 \
+	--eval_steps 10000000000000 \
