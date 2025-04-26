@@ -1,4 +1,9 @@
 DATA/
 inference_output/
 models/
-
+*.swp
+*.swo
+*.un~
+Session.vim
+.netrwhist*
+*~
