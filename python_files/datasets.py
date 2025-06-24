@@ -82,7 +82,7 @@ class Dataset:
 def make_dataset(input_path, tokenizer, batch_size):
     dataset = {}
 
-    for split in ['train', 'test', 'dev']:
+    for split in ['train']:      #, 'test', 'dev']:
         file_name = f"{split}.csv"
         file_path = os.path.join(input_path, file_name)
         
@@ -101,7 +101,7 @@ def make_dataset(input_path, tokenizer, batch_size):
             print(f"Dropped NaN rows from {split}")
 
         sequences = data['sequence'].tolist()
-        labels = data['label'].tolist()
+        labels = data['ID'].tolist()
 
         if split == 'train':
             num_classes = len(set(labels))

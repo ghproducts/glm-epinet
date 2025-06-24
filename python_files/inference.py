@@ -4,12 +4,14 @@ import pandas as pd
 import jax
 import jax.numpy as jnp
 import haiku as hk
+import numpy as np
 
 from config import TrainArgs
-from datasets import make_genome_dataset
+from datasets import Dataset
 from nucleotide_transformer.pretrained import get_pretrained_model
 from enn.networks.bert import make_head_enn, AgentConfig
 from utils import calc_metrics
+from tqdm import tqdm
 
 def inference(args: TrainArgs):
     rng = hk.PRNGSequence(0)
@@ -23,14 +25,27 @@ def inference(args: TrainArgs):
         embeddings_layers_to_save=(m.embeddings_layer,),
         max_positions=m.max_positions,
     )
-    forward_fn = jax.jit(forward_fn)
+    forward_fn = hk.transform(forward_fn) 
+    forward_fn = jax.jit(forward_fn.apply)
 
-    # Load dataset
-    dataset, num_classes = make_genome_dataset(Path(args.input_path), tokenizer, args.batch_size)
-    test_dataset = dataset['test']
+#    # Load dataset
+#    dataset, num_classes = make_genome_dataset(Path(args.input_path), tokenizer, args.batch_size)
+#    test_dataset = dataset['test']
+#
+    data = pd.read_csv(Path(args.input_path))
+    if data.isna().any().any():
+        print(f"Found rows with missing values in {split}")
+        data = data.dropna()
+        print(f"Dropped NaN rows from {split}")
 
-    if args.num_classes:
-        num_classes = args.num_classes
+    sequences = data['sequence'].tolist()
+    labels = data['ID'].tolist()
+    
+    test_dataset = Dataset(sequences, labels, args.batch_size, tokenizer)
+    test_dataset.tokenize()  # Explicit tokenization
+
+    if m.num_classes:
+        num_classes = m.num_classes
 
     # Load epinet
     epinet_config = AgentConfig(index_dim=m.index_dim, prior_scale=m.prior_scale, hiddens=m.hiddens)
@@ -58,7 +73,10 @@ def inference(args: TrainArgs):
         "aleatoric_uncertainty": [], "max_value": [], "vote_percents": []
     }
 
-    for batch_tokens, batch_labels in test_dataset:
+    num_batches = (test_dataset._length + test_dataset._batch_size - 1) // test_dataset._batch_size
+    progress_bar = tqdm(test_dataset, total=num_batches, desc="Running Inference...")
+
+    for batch_tokens, batch_labels in progress_bar:
         key = next(rng)
         embeddings = forward_fn(nt_params, key, batch_tokens)[f"embeddings_{m.embeddings_layer}"]
         pooled = jnp.mean(embeddings, axis=1)
@@ -78,7 +96,7 @@ def inference(args: TrainArgs):
         all_metrics["max_value"].append(metrics["max_confidence"])
         all_metrics["vote_percents"].append(metrics["vote_percentage"])
 
-    results_df = pd.DataFrame({key: jnp.concatenate(val) for key, val in all_metrics.items()})
+    results_df = pd.DataFrame({key: np.concatenate(val) for key, val in all_metrics.items()})
 
     out_path = Path(args.output_path)
     out_path.mkdir(parents=True, exist_ok=True)

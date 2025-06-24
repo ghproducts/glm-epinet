@@ -15,7 +15,7 @@ from nucleotide_transformer.pretrained import get_pretrained_model
 from enn.networks.bert import make_head_enn, AgentConfig
 
 # custom
-from datasets import make_genome_dataset
+from datasets import make_genome_dataset, make_dataset
 from config import TrainArgs
 
 def train(args: TrainArgs):
@@ -31,7 +31,8 @@ def train(args: TrainArgs):
     )
     forward_fn = hk.transform(forward_fn)
 
-    dataset, num_classes = make_genome_dataset(Path(args.input_path), tokenizer, args.batch_size)
+    dataset, num_classes = make_dataset(Path(args.input_path), tokenizer, args.batch_size)
+    
     m.num_classes = num_classes
     train_dataset = dataset['train']
     print(f"length of final training dataset: {train_dataset._length}")
@@ -41,8 +42,8 @@ def train(args: TrainArgs):
     epinet = make_head_enn(agent="epinet", num_classes=m.num_classes, agent_config=epinet_config)
 
     first_batch, _ = next(iter(train_dataset))
-
-    pooled = jnp.mean(forward_fn.apply(nt_params, key, first_batch)[f"embeddings_{m.embeddings_layer}"], axis=1)
+    
+    pooled = jnp.mean(forward_fn.apply(nt_params, next(rng), first_batch)[f"embeddings_{m.embeddings_layer}"], axis=1)
     epinet_index = epinet.indexer(key)
     epinet_params, epinet_state = epinet.init(rng=key, x=pooled, z=epinet_index)
 
@@ -137,5 +138,5 @@ def train(args: TrainArgs):
 
     Path(args.output_path).mkdir(parents=True, exist_ok=True)
     with open(Path(args.output_path) / 'epi_params_final.pkl', 'wb') as f:
-        pickle.dump(epinet_params, f)
+        pkl.dump(epinet_params, f)
     print(f"Model saved to {Path(args.output_path) / 'epi_params_final.pkl'}")

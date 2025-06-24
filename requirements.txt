@@ -1,3 +1,6 @@
+-f https://storage.googleapis.com/jax-releases/jax_releases.html
+-f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+
 absl-py==2.2.2
 array_record==0.5.1
 astunparse==1.6.3
@@ -15,7 +18,7 @@ decorator==5.2.1
 dill==0.4.0
 distrax==0.1.2
 dm-env==1.6
-dm-haiku==0.0.8
+dm-haiku==0.0.9
 dm-tree==0.1.8
 enn @ git+https://github.com/deepmind/enn@8be970ae709b27beb4a2b3a4d0a63d4d74d6d9fb
 etils==1.5.2
@@ -48,7 +51,6 @@ matplotlib==3.9.4
 mizani==0.11.4
 ml_collections==0.1.1
 ml_dtypes==0.5.1
-nucleotide_transformer @ file:///home/gavin/Projects/nucleotide-transformer
 numpy==1.22.4
 oauthlib==3.2.2
 opt_einsum==3.4.0
