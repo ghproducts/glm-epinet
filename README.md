@@ -11,3 +11,7 @@ So for this repo to be run, both need to be installed. I recommend installing th
 installing the other dependencies from the .requirements, as there are a lot of slightly older
 libraries that are used that may be updated to incompatible versions with installation of the 
 epinet in particular.
+
+
+Included is also functionality to implement the basic epinet module through pytorch, and utilities
+to implement this with genomics language modeling. 
