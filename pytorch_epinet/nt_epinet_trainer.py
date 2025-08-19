@@ -12,118 +12,63 @@ from typing import Dict, Any, Optional, List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 
 from transformers import (
     AutoTokenizer,
-    AutoModelForMaskedLM,
+    AutoModelForSequenceClassification,
     TrainingArguments,
     Trainer,
 )
+
+from datasets import load_dataset, ClassLabel
 
 from peft import LoraConfig, TaskType, get_peft_model
 
 # custom imports
 from epinet import EpinetWrapper, EpinetConfig
+from feature_fns import NT_feature_fn
+from utils import ToySeqDataset, compute_metrics
+from inference import predict
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 MODEL_NAME = "InstaDeepAI/nucleotide-transformer-v2-100m-multi-species"
-NUM_LABELS = 2
-
-# ---------------------------
-# Base model + small classifier head
-# ---------------------------
-class NTWithHead(nn.Module):
-    """
-    Load the MLM backbone to match checkpoint shapes; we won't use its lm_head.
-    We'll pool its last hidden state and pass through a small classifier.
-    """
-    def __init__(self, name: str = MODEL_NAME, num_classes: int = NUM_LABELS):
-        super().__init__()
-        self.base = AutoModelForMaskedLM.from_pretrained(
-            name, trust_remote_code=True, output_hidden_states=True
-        )
-        H = self.base.config.hidden_size
-        self.classifier = nn.Linear(H, num_classes)
-
-def nt_feature_fn_seqclf(m: NTWithHead, batch: Dict[str, torch.Tensor]):
-    """
-    Return (base_logits, pooled_hidden) for EpinetWrapper.
-    - base_logits: from our small classifier on pooled hidden states.
-    - pooled_hidden: masked mean over sequence positions.
-    """
-    inputs = batch.data if hasattr(batch, "data") else batch
-    out = m.base(**inputs)                      # has .hidden_states (list of [B, L, H])
-    last = out.hidden_states[-1]                # [B, L, H]
-    mask = inputs.get("attention_mask", None)   # [B, L] or None
-
-    if mask is None:
-        pooled = last.mean(dim=1)               # [B, H]
-    else:
-        msk = mask.unsqueeze(-1).to(last.dtype) # [B, L, 1]
-        denom = msk.sum(dim=1).clamp_min(1e-6)  # [B, 1]
-        pooled = (last * msk).sum(dim=1) / denom
-
-    mu = m.classifier(pooled)                   # [B, C]
-    return mu, pooled
+DATA_PATH = "pytorch_epinet/DATA/train.csv"
+MAX_LEN = 512 # Max length of toneized sequences
 
 # ---------------------------
 # Trainer-compatible wrapper around EpinetWrapper
 # ---------------------------
+
 class HFEpinetSeqClassifier(nn.Module):
-    """
-    Makes EpinetWrapper look like a HF model: accepts (input_ids, attention_mask, labels)
-    and returns dict(loss=..., logits=...).
-    """
-    def __init__(self, wrapper: EpinetWrapper, k_train: int = 1, k_eval: int = 8):
+    def __init__(self, wrapper: EpinetWrapper, k_train=1, k_eval=8):
         super().__init__()
         self.wrapper = wrapper
         self.k_train = k_train
         self.k_eval = k_eval
-
+    
     @property
-    def cfg(self):
+    def cfg(self): 
         return self.wrapper.cfg
-
+    
     def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
         batch = {"input_ids": input_ids, "attention_mask": attention_mask}
         K = self.k_train if self.training else self.k_eval
-        logits = self.wrapper(batch, n_index_samples=K)   # [B, C]
-        loss = None
-        if labels is not None:
-            loss = F.cross_entropy(logits, labels)
+        logits = self.wrapper(batch, n_index_samples=K)
+        loss = F.cross_entropy(logits, labels) if labels is not None else None
         return {"loss": loss, "logits": logits}
 
-# ---------------------------
-# Tiny toy dataset (torch Dataset)
-# ---------------------------
-class ToySeqDataset(torch.utils.data.Dataset):
-    def __init__(self, tokenizer: AutoTokenizer, sequences: List[str], labels: List[int], max_len: Optional[int] = 512):
-        enc = tokenizer(
-            sequences,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=min(max_len, tokenizer.model_max_length) if max_len else tokenizer.model_max_length,
-        )
-        self.enc = {k: v for k, v in enc.items()}   # tensors
-        self.labels = torch.tensor(labels, dtype=torch.long)
-
-    def __len__(self) -> int:
-        return self.labels.shape[0]
-
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        item = {k: v[idx] for k, v in self.enc.items()}
-        item["labels"] = self.labels[idx]
-        return item
 
 # ---------------------------
-# Build everything
+# Build model  
 # ---------------------------
-def build_model_and_tokenizer() -> (HFEpinetSeqClassifier, AutoTokenizer):
+
+def build_model_and_tokenizer(num_labels) -> (HFEpinetSeqClassifier, AutoTokenizer):
     tok = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-
-    # Base+head
-    base = NTWithHead(num_classes=NUM_LABELS)
+    base = AutoModelForSequenceClassification.from_pretrained(
+        MODEL_NAME, trust_remote_code=True, num_labels=num_labels
+    )
+    base.config.output_hidden_states = True
 
     # PEFT LoRA on backbone only (classifier & epinet train normally)
     lora_cfg = LoraConfig(
@@ -134,69 +79,63 @@ def build_model_and_tokenizer() -> (HFEpinetSeqClassifier, AutoTokenizer):
         target_modules=["query", "key", "value", "dense", "intermediate.dense", "output.dense"],
         bias="none",
     )
-    base.base = get_peft_model(base.base, lora_cfg)
+    base = get_peft_model(base, lora_cfg)
 
     # Epinet config (pooled hidden only)
     epi_cfg = EpinetConfig(
-        num_classes=NUM_LABELS
+        num_classes=num_labels
    )
 
-    wrapper = EpinetWrapper(base, nt_feature_fn_seqclf, epi_cfg).to(DEVICE)
+    wrapper = EpinetWrapper(base, NT_feature_fn, epi_cfg).to(DEVICE)
     model = HFEpinetSeqClassifier(wrapper, k_train=1, k_eval=8).to(DEVICE)
     return model, tok
 
-# ---------------------------
-# Metrics (F1 with sklearn if available; otherwise accuracy)
-# ---------------------------
-def compute_metrics(eval_pred):
-    preds = eval_pred.predictions
-    if isinstance(preds, tuple):
-        preds = preds[0]
-    preds = preds.argmax(axis=-1)
-    labels = eval_pred.label_ids
-    try:
-        from sklearn.metrics import f1_score
-        return {"f1_score": f1_score(labels, preds)}
-    except Exception:
-        import numpy as np
-        acc = (preds == labels).mean()
-        return {"accuracy": float(acc)}
 
 # ---------------------------
 # Main
 # ---------------------------
 def main():
-    model, tok = build_model_and_tokenizer()
+    # build dataset
+    ds = load_dataset("csv", data_files=DATA_PATH, split="train") 
+    num_classes = len(set(ds['label']))  # assuming 'ID' is the label column 
+    print(f"Number of classes: {num_classes}")
+    ds = ds.cast_column("label", ClassLabel(num_classes=num_classes))
+    ds = ds.remove_columns(["idx"])
+
+
+    model, tok = build_model_and_tokenizer(num_classes)
+
+    # Tokenize datasets
+    def tokenize_fn(batch):
+        return tok(
+            batch["sequence"],
+            truncation=True,
+            padding="max_length",
+            max_length=MAX_LEN,
+        )
+
+    ds_tok = ds.map(tokenize_fn, batched=True, desc="Tokenizing to fixed length")
+
+    split = ds_tok.train_test_split(test_size=0.2, seed=42)           
+    train, val = split["train"], split["test"]        
+
+    train.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
+    val.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
+
 
     # --- Warm-up forward (builds any lazy epinet cores), then re-freeze prior core just in case ---
+    warm_loader = DataLoader(train, batch_size=8, shuffle=False)
+    warm_batch = next(iter(warm_loader))
     with torch.no_grad():
-        demo = tok(["ATTCCGATTCCGATTCCG", "GATTACA"], return_tensors="pt", padding=True, truncation=True)
-        demo = {k: v.to(DEVICE) for k, v in demo.items()}
-        _ = model(**demo)  # builds epinet MLP cores on first call
-    # Ensure prior head is frozen after lazy build (harmless if already frozen)
+        warm_inputs = {k: v.to(DEVICE) for k, v in warm_batch.items() if k != "labels"}
+        _ = model(**warm_inputs)
     if hasattr(model.wrapper.epinet.prior_head, "core") and model.wrapper.epinet.prior_head.core is not None:
         model.wrapper.epinet.prior_head.core.requires_grad_(False)
 
-    # --- Toy data ---
-    sequences = [
-        "ATTCCGATTCCGATTCCG",
-        "ATTTCTCTCTCTCTCTGAGATCGATCGATCGAT",
-        "GATTACA",
-        "ATGCGTATGCGTATGCGT",
-        "TTTTTTTTTTTTTTTTTT",
-        "ACGTACGTACGTACGT",
-    ]
-    labels = [0, 1, 0, 1, 0, 1]  # toy binary
-    # small split
-    train_idx = [0, 1, 2, 3]
-    val_idx   = [4, 5]
-
-    train_ds = ToySeqDataset(tok, [sequences[i] for i in train_idx], [labels[i] for i in train_idx], max_len=256)
-    val_ds   = ToySeqDataset(tok, [sequences[i] for i in val_idx],   [labels[i] for i in val_idx],   max_len=256)
 
     # --- Trainer ---
     args = TrainingArguments(
-        output_dir="nt-epinet-toy",
+        output_dir="nt-epinet",
         eval_strategy="epoch",
         save_strategy="no",
         learning_rate=2e-4,
@@ -211,8 +150,8 @@ def main():
     trainer = Trainer(
         model=model,
         args=args,
-        train_dataset=train_ds,
-        eval_dataset=val_ds,
+        train_dataset=train,
+        eval_dataset=val,
         tokenizer=tok,
         compute_metrics=compute_metrics,
     )
@@ -223,8 +162,27 @@ def main():
     print("Eval metrics:", metrics)
 
     # Predict on val set to show logits
-    preds = trainer.predict(val_ds)
-    print("Logits (val):", preds.predictions)
+    # preds = trainer.predict(val_ds)
+    # print("Logits (val):", preds.predictions)
+
+    # Compute uncertainty
+    K = getattr(model, "k_eval", 16)
+    rows = predict(
+        model=model,
+        dataset=val,
+        device=DEVICE,
+        k_samples=K,
+        batch_size=32,
+        outfile="val_uncertainty.csv",     # or None
+        save_logits_npz=None,              # or "val_logits_all.npz"
+        use_amp=False,                     # True if you want faster inference on GPU
+    )
+
+    for j, r in list(enumerate(rows))[:10]:
+        print(f"[val ex {j}] label={r['label']} pred={r['pred']} "
+            f"conf={r['max_confidence']:.3f} U_tot={r['U_total']:.3f} "
+            f"U_epi={r['U_epistemic']:.3f} U_ale={r['U_aleatoric']:.3f} "
+            f"votes={r['vote_pct']:.3f}")
 
 if __name__ == "__main__":
     main()
