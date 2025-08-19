@@ -5,9 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ---------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------
+
 
 @dataclass
 class EpinetConfig:
@@ -19,18 +17,8 @@ class EpinetConfig:
     stop_grad_features: bool = True      # detach hidden before epinet
 
 # ---------------------------------------------------------------------
-# Core building blocks (strict tensor only)
+# Epinet components
 # ---------------------------------------------------------------------
-
-# class GaussianIndexer(nn.Module):
-#     """z ~ N(0, I) with shape [B, Dz]."""
-#     def __init__(self, index_dim: int):
-#         super().__init__()
-#         self.index_dim = index_dim
-#     @torch.no_grad()
-#     def forward(self, batch: int, device=None, dtype=None):
-#         return torch.randn(batch, self.index_dim, device=device, dtype=dtype or torch.float32)
-#     
 
 class GaussianIndexer(nn.Module):
     """z ~ N(0, I) with shape [Dz], shared across batch."""
@@ -50,35 +38,6 @@ def _mlp(in_dim: int, hidden: Iterable[int], out_dim: int) -> nn.Sequential:
         d = h
     layers += [nn.Linear(d, out_dim)]
     return nn.Sequential(*layers)
-
-# class ProjectedMLP(nn.Module):
-#     """
-#     MLP -> [B, C*Dz] reshaped to [B, C, Dz]; logits = (M @ z).
-#     Always concatenates z to inputs.
-#     """
-#     def __init__(self, num_classes: int, index_dim: int, hidden: Iterable[int] = (512,)):
-#         super().__init__()
-#         self.num_classes = num_classes
-#         self.index_dim = index_dim
-#         self.hidden = tuple(hidden)
-#         self.core: Optional[nn.Sequential] = None  # lazy on first forward
-# 
-#     def _build(self, in_dim: int):
-#         self.core = _mlp(in_dim, self.hidden, self.num_classes * self.index_dim)
-# 
-#     def forward(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
-#         if x.dim() != 2 or z.dim() != 2:
-#             raise ValueError("ProjectedMLP expects x:[B,D], z:[B,Dz].")
-#         if x.shape[0] != z.shape[0]:
-#             raise ValueError("Batch dims of x and z must match.")
-#         h = torch.cat([x, z], dim=-1)
-#         if self.core is None:
-#             self._build(h.shape[-1])
-#         out = self.core(h)                        # [B, C*Dz]
-#         B, Dz = z.shape
-#         m = out.view(B, self.num_classes, Dz)     # [B, C, Dz]
-#         return torch.einsum('bcd,bd->bc', m, z)   # [B, C]
-#     
 
 
 class ProjectedMLP(nn.Module):
@@ -154,7 +113,7 @@ class MLPEpinetWithPrior(nn.Module):
         return train + self.cfg.prior_scale * prior
 
 # ---------------------------------------------------------------------
-# Wrapper
+# epinet wrapper
 # ---------------------------------------------------------------------
 
 class EpinetWrapper(nn.Module):
