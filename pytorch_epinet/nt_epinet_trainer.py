@@ -28,12 +28,12 @@ from peft import LoraConfig, TaskType, get_peft_model
 # custom imports
 from epinet import EpinetWrapper, EpinetConfig
 from feature_fns import NT_feature_fn
-from utils import ToySeqDataset, compute_metrics
+from utils import compute_metrics
 from inference import predict
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 MODEL_NAME = "InstaDeepAI/nucleotide-transformer-v2-100m-multi-species"
-DATA_PATH = "pytorch_epinet/DATA/train.csv"
+DATA_PATH = "DATA/gene_taxa/train.csv"
 MAX_LEN = 512 # Max length of toneized sequences
 
 # ---------------------------
@@ -87,7 +87,7 @@ def build_model_and_tokenizer(num_labels) -> (HFEpinetSeqClassifier, AutoTokeniz
    )
 
     wrapper = EpinetWrapper(base, NT_feature_fn, epi_cfg).to(DEVICE)
-    model = HFEpinetSeqClassifier(wrapper, k_train=1, k_eval=8).to(DEVICE)
+    model = HFEpinetSeqClassifier(wrapper, k_train=8, k_eval=8).to(DEVICE)
     return model, tok
 
 
@@ -97,10 +97,10 @@ def build_model_and_tokenizer(num_labels) -> (HFEpinetSeqClassifier, AutoTokeniz
 def main():
     # build dataset
     ds = load_dataset("csv", data_files=DATA_PATH, split="train") 
-    num_classes = len(set(ds['label']))  # assuming 'ID' is the label column 
-    print(f"Number of classes: {num_classes}")
-    ds = ds.cast_column("label", ClassLabel(num_classes=num_classes))
     ds = ds.remove_columns(["idx"])
+    num_classes = len(set(ds['labels']))
+    print(f"Number of classes: {num_classes}")
+    ds = ds.cast_column("labels", ClassLabel(num_classes=num_classes))
 
 
     model, tok = build_model_and_tokenizer(num_classes)
@@ -119,27 +119,31 @@ def main():
     split = ds_tok.train_test_split(test_size=0.2, seed=42)           
     train, val = split["train"], split["test"]        
 
-    train.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
-    val.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
+    train.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+    val.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
 
 
     # --- Warm-up forward (builds any lazy epinet cores), then re-freeze prior core just in case ---
     warm_loader = DataLoader(train, batch_size=8, shuffle=False)
     warm_batch = next(iter(warm_loader))
     with torch.no_grad():
-        warm_inputs = {k: v.to(DEVICE) for k, v in warm_batch.items() if k != "labels"}
+        warm_inputs = {
+                "input_ids": warm_batch["input_ids"].to(DEVICE),
+                "attention_mask": warm_batch["attention_mask"].to(DEVICE),
+        }
         _ = model(**warm_inputs)
     if hasattr(model.wrapper.epinet.prior_head, "core") and model.wrapper.epinet.prior_head.core is not None:
         model.wrapper.epinet.prior_head.core.requires_grad_(False)
 
+    model.to(DEVICE) 
 
     # --- Trainer ---
     args = TrainingArguments(
         output_dir="nt-epinet",
         eval_strategy="epoch",
-        save_strategy="no",
+        save_strategy="epoch",
         learning_rate=2e-4,
-        per_device_train_batch_size=4,
+        per_device_train_batch_size=8,
         per_device_eval_batch_size=8,
         num_train_epochs=2,
         logging_steps=10,

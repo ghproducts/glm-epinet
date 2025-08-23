@@ -69,6 +69,7 @@ class ProjectedMLP(nn.Module):
 
         if self.core is None:
             self._build(h.shape[-1])
+            self.core.to(h.device)
 
         out = self.core(h)                         # [B, C*Dz]
         B = x.shape[0]

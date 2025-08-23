@@ -41,7 +41,7 @@ def predict(
             # one base forward; K head forwards -> [K, B, C]
             logits_all = model.wrapper(inputs, n_index_samples=k_samples, return_all=True)
 
-        unc = compute_uncertainty_torch(logits_all)           # dict of [B]-tensors
+        unc = compute_uncertainty(logits_all)           # dict of [B]-tensors
 
         B = labels.size(0)
         for i in range(B):
