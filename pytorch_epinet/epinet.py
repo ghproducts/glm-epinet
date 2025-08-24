@@ -10,9 +10,9 @@ import torch.nn.functional as F
 @dataclass
 class EpinetConfig:
     num_classes: int
-    index_dim: int = 32                  # Dz
+    index_dim: int = 30                  # Dz
     hidden_sizes: Iterable[int] = (50, 50) # epinet MLP widths
-    prior_scale: float = 0.5             # weight on frozen prior head
+    prior_scale: float = 1             # weight on frozen prior head
     include_inputs: bool = False         # if True and batch is a Tensor, concat flat(batch) to hidden
     stop_grad_features: bool = True      # detach hidden before epinet
 
@@ -41,17 +41,21 @@ def _mlp(in_dim: int, hidden: Iterable[int], out_dim: int) -> nn.Sequential:
 
 
 class ProjectedMLP(nn.Module):
-    def __init__(self, num_classes: int, index_dim: int, hidden: Iterable[int], concat_index: bool = True):
+    def __init__(self, num_classes: int, index_dim: int, hidden: Iterable[int], concat_index: bool = True, trainable: bool = True):
         super().__init__()
         self.num_classes = num_classes
         self.index_dim = index_dim
         self.hidden = tuple(hidden)
         self.concat_index = concat_index
+        self.trainable = trainable
         self.core: Optional[nn.Sequential] = None  # lazy init
 
     def _build(self, in_dim: int):
         # _mlp(in_dim, hidden, out_dim) must have NO activation on the final layer
         self.core = _mlp(in_dim, self.hidden, self.num_classes * self.index_dim)
+        if not self.trainable:
+            for p in self.core.parameters():                       
+                p.requires_grad = False                            
 
     def forward(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         # Expect x: [B, Din], z: [Dz]  (shared across batch)
@@ -88,10 +92,8 @@ class MLPEpinetWithPrior(nn.Module):
         super().__init__()
         self.cfg = cfg
         C, Dz = cfg.num_classes, cfg.index_dim
-        self.train_head = ProjectedMLP(C, Dz, cfg.hidden_sizes)
-        self.prior_head = ProjectedMLP(C, Dz, cfg.hidden_sizes)
-        for p in self.prior_head.parameters():
-            p.requires_grad = False
+        self.train_head = ProjectedMLP(C, Dz, cfg.hidden_sizes, trainable=True)
+        self.prior_head = ProjectedMLP(C, Dz, cfg.hidden_sizes, trainable=False)
         self.indexer = GaussianIndexer(Dz)
 
     @staticmethod

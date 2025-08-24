@@ -1,74 +1,89 @@
-# uncertainty_inference.py
-from typing import Optional, List, Dict, Any
+import argparse
+import os
+from typing import Optional
+
 import torch
-from torch.utils.data import DataLoader
 import pandas as pd
-from utils import compute_uncertainty  # you already have this
+from datasets import Dataset, load_dataset # type: ignore
+from nt_epinet import load_model_and_tokenizer, predict
 
-def _collate(batch):
-    keys = batch[0].keys()
-    return {k: torch.stack([b[k] for b in batch], dim=0) for k in keys}
 
-@torch.no_grad()
-def predict(
-    model,
-    dataset,
-    device: torch.device,
-    k_samples: int = 16,
-    batch_size: int = 32,
-    outfile: Optional[str] = "val_uncertainty.csv",
-    save_logits_npz: Optional[str] = None,   # e.g., "val_logits_all.npz"
-    use_amp: bool = False,
-) -> List[Dict[str, Any]]:
-    """
-    One base forward + K epinet head forwards per batch (return_all=True),
-    computes uncertainty from the full stack, and optionally saves outputs.
-    """
-    model.eval()
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=_collate)
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-    rows: List[Dict[str, Any]] = []
-    all_logits = []
-    all_labels = []
+def parse_args():
+    p = argparse.ArgumentParser(description="NT+Epinet inference on a CSV of sequences.")
+    p.add_argument("--checkpoint", type=str, required=True,
+                   help="Path to a Trainer checkpoint dir containing pytorch_model.bin")
+    p.add_argument("--input_csv", type=str, required=True,
+                   help="CSV with at least a 'sequence' column. 'labels' optional (dummy will be added if missing).")
+    p.add_argument("--num_classes", type=int, required=True,
+                   help="Number of classes used during training (must match the trained head).")
+    p.add_argument("--output_csv", type=str, default="inference_results.csv",
+                   help="Where to save predictions + uncertainties (CSV). Use None to skip.")
+    p.add_argument("--save_logits_npz", type=str, default=None,
+                   help="Optional .npz path to save stacked logits [K,N,C] and labels [N].")
+    p.add_argument("--k_samples", type=int, default=16,
+                   help="Number of epinet index samples for uncertainty.")
+    p.add_argument("--batch_size", type=int, default=32,
+                   help="Batch size for inference.")
+    p.add_argument("--max_len", type=int, default=512,
+                   help="Tokenizer max sequence length (should match training).")
+    p.add_argument("--use_amp", action="store_true",
+                   help="Enable autocast(fp16) on CUDA during inference.")
+    return p.parse_args()
 
-    amp_ctx = torch.autocast(device_type="cuda", dtype=torch.float16) if (use_amp and device.type == "cuda") else torch.cpu.amp.autocast(enabled=False)
 
-    for batch in loader:
-        labels = batch.pop("labels").to(device)               # [B]
-        inputs = {k: v.to(device) for k, v in batch.items()}
+def build_dataset(csv_path: str, tok, max_len: int) -> Dataset:
+    ds = load_dataset("csv", data_files=csv_path, split="train")
+    if "labels" not in ds.column_names:
+        ds = ds.add_column("labels", [0] * len(ds))  # dummy
 
-        with amp_ctx:
-            # one base forward; K head forwards -> [K, B, C]
-            logits_all = model.wrapper(inputs, n_index_samples=k_samples, return_all=True)
+    def tokenize_fn(batch):
+        return tok(
+            batch["sequence"],
+            truncation=True,
+            padding="max_length",
+            max_length=max_len,
+        )
 
-        unc = compute_uncertainty(logits_all)           # dict of [B]-tensors
+    ds_tok = ds.map(tokenize_fn, batched=True, desc="Tokenizing to fixed length")
+    ds_tok.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+    return ds_tok
 
-        B = labels.size(0)
-        for i in range(B):
-            rows.append({
-                "label": int(labels[i]),
-                "pred": int(unc["predicted_class"][i]),
-                "max_confidence": float(unc["max_confidence"][i]),
-                "U_total": float(unc["normalized_total_uncertainty"][i]),
-                "U_epistemic": float(unc["normalized_epistemic_uncertainty"][i]),
-                "U_aleatoric": float(unc["normalized_aleatoric_uncertainty"][i]),
-                "vote_pct": float(unc["vote_percentage"][i]),
-            })
+def main():
+    args = parse_args()
 
-        if save_logits_npz is not None:
-            all_logits.append(logits_all.cpu())               # [K,B,C]
-            all_labels.append(labels.cpu())
+    # 1) Build model + tokenizer and load checkpoint
+    model, tok = load_model_and_tokenizer(args.num_classes, args.checkpoint)
 
+    # 2) Prepare dataset
+    ds_tok = build_dataset(args.input_csv, tok, args.max_len)
+
+    # 3) Run inference with uncertainty
+    outfile: Optional[str] = args.output_csv if args.output_csv.lower() != "none" else None
+    rows = predict(
+        model=model,
+        dataset=ds_tok,
+        device=DEVICE,
+        k_samples=args.k_samples,
+        batch_size=args.batch_size,
+        outfile=outfile,
+        save_logits_npz=args.save_logits_npz,
+        use_amp=args.use_amp,
+    )
+
+    # 4) Small summary
+    n = len(rows)
+    preds = sum(int(r["pred"]) == int(r["label"]) for r in rows)
+    print(f"[inference] completed on {n} samples.")
+    if "labels" in ds_tok.column_names:
+        acc = preds / max(1, n)
+        print(f"[inference] (labels present) crude accuracy={acc:.3f}")
     if outfile is not None:
-        pd.DataFrame(rows).to_csv(outfile, index=False)
-        print(f"[uncertainty] wrote {outfile} with {len(rows)} rows")
+        print(f"[inference] wrote CSV to: {outfile}")
+    if args.save_logits_npz is not None:
+        print(f"[inference] saved logits stack to: {args.save_logits_npz}")
 
-    if save_logits_npz is not None:
-        import numpy as np
-        # stack batches into [K, N, C] and [N]
-        logits = torch.cat(all_logits, dim=1).numpy()
-        labels = torch.cat(all_labels, dim=0).numpy()
-        np.savez_compressed(save_logits_npz, logits_all=logits, labels=labels)
-        print(f"[uncertainty] saved logits stack to {save_logits_npz} (shape {logits.shape})")
 
-    return rows
+if __name__ == "__main__":
+    main()

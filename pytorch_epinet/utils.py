@@ -21,33 +21,34 @@ from epinet import EpinetWrapper, EpinetConfig
 from feature_fns import NT_feature_fn
 
 
-# ---------------------------
-# toy dataset (torch Dataset)
-# ---------------------------
-class ToySeqDataset(torch.utils.data.Dataset):
-    def __init__(self, tokenizer: AutoTokenizer, sequences: List[str], labels: List[int], max_len: Optional[int] = 512):
-        enc = tokenizer(
-            sequences,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=min(max_len, tokenizer.model_max_length) if max_len else tokenizer.model_max_length,
-        )
-        self.enc = {k: v for k, v in enc.items()}   # tensors
-        self.labels = torch.tensor(labels, dtype=torch.long)
 
-    def __len__(self) -> int:
-        return self.labels.shape[0]
+# loading NT ennn
+def load_model_and_tokenizer(num_classes: int, checkpoint: str, device: torch.device):
+    # Rebuild architecture exactly like training and load weights
+    model, tok = build_model_and_tokenizer(num_classes)
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        item = {k: v[idx] for k, v in self.enc.items()}
-        item["labels"] = self.labels[idx]
-        return item
-    
+    # dummy init
+    with torch.no_grad():
+        dummy = tok("ACGT", truncation=True, padding="max_length", max_length=32, return_tensors="pt")
+        dummy = {k: v.to(device) for k, v in dummy.items()}
+        _ = model(**dummy)  # builds epinet internals
 
-# ---------------------------
-# Metrics (F1 with sklearn if available; otherwise accuracy)
-# ---------------------------
+    state_path = os.path.join(checkpoint, "model.safetensors")
+    if not os.path.isfile(state_path):
+        raise FileNotFoundError(f"Could not find checkpoint weights at: {state_path}")
+    sd = load_file(state_path)
+    model.load_state_dict(sd, strict=True)
+    model.to(device).eval()
+
+
+
+    return model, tok
+
+
+
+
+
+# Metrics 
 def compute_metrics(eval_pred):
     preds = eval_pred.predictions
     if isinstance(preds, tuple):
