@@ -34,7 +34,7 @@ def parse_args():
                    help="CSV with a 'sequence' column and 'labels'.")
     p.add_argument("--output_dir", type=str, required=False, default = 'nt-epinet',
                    help = "output file location for predictions and checkpoint")
-    p.add_argument("--num_classes", type=int, required=True,
+    p.add_argument("--num_classes", type=int, required=False,
                    help="Number of classes used during training.")
     p.add_argument("--batch_size", type=int, default=32,
                    help="Batch size for inference.")
@@ -51,10 +51,14 @@ def main():
 
     # build dataset
     ds = load_dataset("csv", data_files=args.input_csv, split="train") 
+
     if args.num_classes:
         num_classes = args.num_classes
     else:
-        num_classes = len(set(ds['labels']))
+        if 'labels' in ds.column_names:
+            num_classes = len(set(ds['labels']))
+        else:
+            raise ValueError("'labels' column not found in dataset")
     print(f"Number of classes: {num_classes}")
     ds = ds.cast_column("labels", ClassLabel(num_classes=num_classes))
 

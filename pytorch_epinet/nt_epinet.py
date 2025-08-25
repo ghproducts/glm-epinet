@@ -181,6 +181,9 @@ def predict(
             all_labels.append(labels.cpu())
 
     if outfile is not None:
+        outdir = os.path.dirname(outfile)
+        if outdir:  
+            os.makedirs(outdir, exist_ok=True)
         pd.DataFrame(rows).to_csv(outfile, index=False)
         print(f"[uncertainty] wrote {outfile} with {len(rows)} rows")
 
